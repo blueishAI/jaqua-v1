@@ -243,7 +243,7 @@ def _train_worker(index: int) -> None:
 
 
 def main() -> None:
-    xmp.spawn(_train_worker, nprocs=8)
+    xmp.spawn(_train_worker)
 
 
 if __name__ == "__main__":
