@@ -4,23 +4,16 @@ from itertools import islice
 from typing import Dict, List
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets, load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.parallel_loader as pl
+import torch_xla.distributed.xla_multiprocessing as xmp
 
 from config import JaquaConfig
-
-
-def _cuda_dtype() -> torch.dtype:
-    if not torch.cuda.is_available():
-        return torch.float32
-
-    major, _ = torch.cuda.get_device_capability()
-    return torch.bfloat16 if major >= 8 and torch.cuda.is_bf16_supported() else torch.float16
 
 
 def _clean_messages(messages: List[Dict]) -> List[Dict[str, str]]:
@@ -153,34 +146,26 @@ def _collate_batch(tokenizer, examples: List[Dict]) -> Dict[str, torch.Tensor]:
     return batch
 
 
-def main() -> None:
+def _train_worker(index: int) -> None:
     cfg = JaquaConfig()
     os.makedirs(cfg.adapter_dir, exist_ok=True)
 
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    rank = int(os.getenv("RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        torch.cuda.set_device(local_rank)
-    if world_size > 1:
-        dist.init_process_group(backend="nccl")
-    if device != "cuda" and rank == 0:
-        print("[lora] WARNING: CUDA not found. LoRA path is intended for Kaggle GPU.")
+    device = xm.xla_device()
+    rank = xm.get_ordinal()
+    world_size = xm.xrt_world_size()
     if rank == 0:
-        print(f"[lora] artifact={cfg.artifact_name}")
-        print(f"[lora] base_model={cfg.base_model_id}")
-        print(f"[lora] dataset={cfg.dataset_id} split={cfg.dataset_split}")
+        print(f"[lora-tpu] artifact={cfg.artifact_name}")
+        print(f"[lora-tpu] base_model={cfg.base_model_id}")
+        print(f"[lora-tpu] dataset={cfg.dataset_id} split={cfg.dataset_split}")
+        print(f"[lora-tpu] world_size={world_size}")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_id, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_dtype = _cuda_dtype()
     model = AutoModelForCausalLM.from_pretrained(
         cfg.base_model_id,
-        torch_dtype=model_dtype,
+        torch_dtype=torch.bfloat16,
         attn_implementation="sdpa",
     )
     model.config.use_cache = False
@@ -196,21 +181,18 @@ def main() -> None:
     model = get_peft_model(model, lora_cfg)
     model.to(device)
     model.train()
+    xm.mark_step()
 
     ds = _load_training_dataset(cfg, tokenizer)
     ds = ds.filter(lambda row: any(label != -100 for label in row["labels"]) and len(row["input_ids"]) > 0)
-    sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
+    sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True)
     loader = DataLoader(
         ds,
         batch_size=cfg.micro_batch_size,
-        shuffle=(sampler is None),
         sampler=sampler,
         drop_last=True,
         collate_fn=lambda examples: _collate_batch(tokenizer, examples),
     )
-
-    if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=cfg.lora_lr, weight_decay=0.0)
     step = 0
@@ -218,13 +200,13 @@ def main() -> None:
     epoch = 0
     while step < cfg.lora_steps:
         epoch += 1
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-        for i, batch in enumerate(loader, start=1):
+        sampler.set_epoch(epoch)
+        para_loader = pl.MpDeviceLoader(loader, device)
+        for i, batch in enumerate(para_loader, start=1):
             step += 1
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+            input_ids = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            labels = batch["labels"]
 
             out = model(input_ids=input_ids, attention_mask=attention_mask)
             shift_logits = out.logits[:, :-1, :].contiguous().float()
@@ -240,31 +222,28 @@ def main() -> None:
 
             if step % cfg.grad_accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                xm.optimizer_step(optimizer, barrier=True)
                 optimizer.zero_grad(set_to_none=True)
+            else:
+                xm.mark_step()
 
             if step % cfg.log_every == 0 and rank == 0:
                 print(f"[lora] step={step}/{cfg.lora_steps} batch={i}/{len(loader)} loss={float(loss.detach().cpu()):.4f}")
 
-            if step % cfg.save_every == 0 and rank == 0:
-                ckpt = os.path.join(cfg.output_dir, "checkpoints", cfg.artifact_name, f"step-{step}")
-                saver = model.module if hasattr(model, "module") else model
-                saver.save_pretrained(ckpt)
-                tokenizer.save_pretrained(ckpt)
-                print(f"[lora] saved checkpoint: {ckpt}")
-
             if step >= cfg.lora_steps:
                 break
 
+    xm.rendezvous(f"{cfg.artifact_name}-final-save")
     if rank == 0:
-        saver = model.module if hasattr(model, "module") else model
+        saver = model.to("cpu")
         saver.save_pretrained(cfg.adapter_dir)
         tokenizer.save_pretrained(cfg.adapter_dir)
         print(f"[lora] training finished -> {cfg.adapter_dir}")
+    xm.rendezvous(f"{cfg.artifact_name}-done")
 
-    if world_size > 1:
-        dist.barrier()
-        dist.destroy_process_group()
+
+def main() -> None:
+    xmp.spawn(_train_worker, nprocs=8)
 
 
 if __name__ == "__main__":

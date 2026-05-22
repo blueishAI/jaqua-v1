@@ -9,26 +9,20 @@ fi
 cd "$(dirname "$0")"
 
 export JAQUA_WORK_DIR="/kaggle/working"
-export JAQUA_OUTPUT_DIR="/kaggle/working/output_base_web"
+export JAQUA_OUTPUT_DIR="/kaggle/working/output_tpu"
 export HF_HOME="/kaggle/temp/hf_cache"
+export PJRT_DEVICE=TPU
+export XLA_USE_BF16=1
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_NO_TF=1
 export TRANSFORMERS_NO_TORCHVISION=1
 export USE_TF=0
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 mkdir -p "${JAQUA_OUTPUT_DIR}/logs" "${JAQUA_OUTPUT_DIR}/gguf" "${HF_HOME}" /kaggle/temp
 : > "${JAQUA_OUTPUT_DIR}/logs/train.log"
 
 echo "[setup] Installing dependencies and building llama.cpp"
 bash setup.sh
-
-NPROC="$(python - <<'PY'
-import torch
-print(torch.cuda.device_count() if torch.cuda.is_available() else 1)
-PY
-)"
-echo "[setup] torchrun processes: ${NPROC}"
 
 quantize_bin() {
   if [[ -x /kaggle/temp/llama.cpp/build/bin/llama-quantize ]]; then
@@ -105,7 +99,7 @@ smoke_test_gguf() {
     echo
     "$(llama_cli_bin)" \
       -m "${gguf}" \
-      -ngl 99 \
+      -ngl 0 \
       -c 2048 \
       -n 256 \
       --temp 0.2 \
@@ -144,10 +138,10 @@ run_variant() {
   export JAQUA_LORA_LR="${lr}"
   export JAQUA_LORA_R="${lora_r}"
   export JAQUA_LORA_ALPHA="${lora_alpha}"
-  export JAQUA_LORA_DROPOUT="${JAQUA_LORA_DROPOUT:-0.05}"
+  export JAQUA_LORA_DROPOUT="0.05"
   export JAQUA_MAX_SAMPLES="${max_samples}"
-  export JAQUA_LOG_EVERY="${JAQUA_LOG_EVERY:-20}"
-  export JAQUA_SAVE_EVERY="${JAQUA_SAVE_EVERY:-200}"
+  export JAQUA_LOG_EVERY="20"
+  export JAQUA_SAVE_EVERY="200"
 
   local artifact="jaqua-${param_label}-${variant}"
   local merged_dir="${JAQUA_OUTPUT_DIR}/merged/${artifact}-F16"
@@ -158,13 +152,10 @@ run_variant() {
   echo "[train] ${artifact}"
   echo "[train] base=${base_model}"
   echo "[train] data=${dataset} split=${split}"
-  torchrun --standalone --nproc_per_node="${NPROC}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
+  python lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
 
   echo "[merge] ${artifact}"
   python lora_merge.py
-
-  echo "[validate] ${artifact}"
-  python lora_validate.py
 
   echo "[gguf] ${artifact} F16"
   python "$(convert_script)" "${merged_dir}" --outfile "${gguf_f16}" --outtype f16
@@ -175,34 +166,40 @@ run_variant() {
   echo "[gguf] ${artifact} Q8_0"
   "$(quantize_bin)" "${gguf_f16}" "${gguf_q8}" Q8_0
 
-  if [[ "${JAQUA_KEEP_F16_GGUF:-0}" != "1" ]]; then
-    rm -f "${gguf_f16}"
-  fi
+  rm -f "${gguf_f16}"
 
   smoke_test_gguf "${artifact}" "${variant}" Q4_K_M
   smoke_test_gguf "${artifact}" "${variant}" Q8_0
 }
 
 BASE_15_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
+REASON_27_MODEL="Qwen/Qwen2.5-3B-Instruct"
 
 BASE_DATASET="HuggingFaceH4/ultrachat_200k"
 BASE_SPLIT="train_sft"
 WEB_DATASET="BitAgent/tool_calling"
 WEB_SPLIT="train"
+REASON_DATASET="open-r1/OpenR1-Math-220k"
+REASON_SPLIT="train"
+REASON_WEB_DATASET="open-r1/OpenR1-Math-220k,BitAgent/tool_calling"
+REASON_WEB_SPLIT="train,train"
 
 run_variant 1.5b base "${BASE_15_MODEL}" "${BASE_DATASET}" "${BASE_SPLIT}" \
-  2400 512 2 4 1e-4 16 32 100000
+  2400 512 4 2 1e-4 16 32 100000
 
 run_variant 1.5b web "${BASE_15_MODEL}" "${WEB_DATASET}" "${WEB_SPLIT}" \
-  1200 512 2 4 8e-5 16 32 80000
+  1200 512 4 2 8e-5 16 32 80000
+
+run_variant 2.7b reason "${REASON_27_MODEL}" "${REASON_DATASET}" "${REASON_SPLIT}" \
+  1800 768 2 4 8e-5 32 64 80000
+
+REASON_MERGED="${JAQUA_OUTPUT_DIR}/merged/jaqua-2.7b-reason-F16"
+run_variant 2.7b reason-web "${REASON_MERGED}" "${REASON_WEB_DATASET}" "${REASON_WEB_SPLIT}" \
+  1000 768 2 4 5e-5 16 32 80000
 
 echo "[final] Package artifacts"
-if [[ "${JAQUA_PACKAGE_MERGED:-0}" == "1" ]]; then
-  tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_artifacts.tar.gz" gguf merged adapters logs
-else
-  tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_artifacts.tar.gz" gguf adapters logs
-fi
+tar -C "${JAQUA_OUTPUT_DIR}" -czf "${JAQUA_OUTPUT_DIR}/jaqua_tpu_artifacts.tar.gz" gguf adapters logs
 
-echo "Jaqua base/web LoRA pipeline complete."
+echo "Jaqua TPU LoRA pipeline complete."
 echo "GGUF outputs:"
 ls -lh "${JAQUA_OUTPUT_DIR}/gguf" | sed -n '1,200p'

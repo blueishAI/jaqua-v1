@@ -9,3 +9,5 @@ tokenizers==0.21.1
 transformers==4.51.3
 peft==0.16.0
 torch==2.8.0
+torch_xla[tpu]==2.8.0
+-f https://storage.googleapis.com/libtpu-releases/index.html

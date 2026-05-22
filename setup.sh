@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Kaggle GPU environment setup for Jaqua LoRA.
+# Kaggle TPU environment setup for Jaqua LoRA.
 export DEBIAN_FRONTEND=noninteractive
 export HF_HOME="${HF_HOME:-/kaggle/temp/hf_cache}"
 export TRANSFORMERS_CACHE="${HF_HOME}"
@@ -24,4 +24,4 @@ fi
 cmake -S /kaggle/temp/llama.cpp -B /kaggle/temp/llama.cpp/build -DGGML_NATIVE=OFF
 cmake --build /kaggle/temp/llama.cpp/build -j"$(nproc)"
 
-echo "LoRA setup complete."
+echo "TPU LoRA setup complete."

@@ -16,14 +16,6 @@ PROMPTS = [
 ]
 
 
-def _cuda_dtype() -> torch.dtype:
-    if not torch.cuda.is_available():
-        return torch.float32
-
-    major, _ = torch.cuda.get_device_capability()
-    return torch.bfloat16 if major >= 8 and torch.cuda.is_bf16_supported() else torch.float16
-
-
 def _looks_broken(text: str) -> bool:
     stripped = text.strip()
     if len(stripped) < 8:
@@ -45,16 +37,15 @@ def main() -> None:
     if not os.path.isdir(cfg.merged_dir):
         raise RuntimeError(f"Missing merged model directory: {cfg.merged_dir}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(cfg.merged_dir, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
         cfg.merged_dir,
-        torch_dtype=_cuda_dtype(),
+        torch_dtype=torch.float32,
         attn_implementation="sdpa",
-    ).to(device)
+    )
     model.eval()
 
     failures = []
@@ -67,8 +58,8 @@ def main() -> None:
                 tokenize=True,
                 add_generation_prompt=True,
                 return_tensors="pt",
-            ).to(device)
-            attention_mask = torch.ones_like(input_ids, device=device)
+            )
+            attention_mask = torch.ones_like(input_ids)
 
             with torch.no_grad():
                 output_ids = model.generate(

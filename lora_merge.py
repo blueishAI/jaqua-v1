@@ -7,14 +7,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from config import JaquaConfig
 
 
-def _cuda_dtype() -> torch.dtype:
-    if not torch.cuda.is_available():
-        return torch.float32
-
-    major, _ = torch.cuda.get_device_capability()
-    return torch.bfloat16 if major >= 8 and torch.cuda.is_bf16_supported() else torch.float16
-
-
 def main() -> None:
     cfg = JaquaConfig()
 
@@ -23,7 +15,7 @@ def main() -> None:
 
     base = AutoModelForCausalLM.from_pretrained(
         cfg.base_model_id,
-        torch_dtype=_cuda_dtype(),
+        torch_dtype=torch.float32,
         attn_implementation="sdpa",
     )
     model = PeftModel.from_pretrained(base, cfg.adapter_dir)
