@@ -180,6 +180,8 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     use_qlora = os.getenv("JAQUA_QLORA", "0") == "1"
+    if rank == 0:
+        print(f"[lora-cuda] qlora={use_qlora}")
     quantization_config = None
     if use_qlora:
         quantization_config = BitsAndBytesConfig(

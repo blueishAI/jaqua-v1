@@ -178,7 +178,11 @@ run_variant() {
   echo "[train] ${artifact}"
   echo "[train] base=${base_model}"
   echo "[train] data=${dataset} split=${split}"
-  torchrun --standalone --nproc_per_node="${nproc}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
+  if [[ "${nproc}" == "1" ]]; then
+    python lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
+  else
+    torchrun --standalone --nproc_per_node="${nproc}" lora_train.py 2>&1 | tee -a "${JAQUA_OUTPUT_DIR}/logs/train.log"
+  fi
 
   echo "[merge] ${artifact}"
   python lora_merge.py
