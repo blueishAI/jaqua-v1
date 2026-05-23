@@ -9,3 +9,4 @@ tokenizers==0.21.1
 transformers==4.51.3
 peft==0.16.0
 torch==2.8.0
+bitsandbytes==0.46.0

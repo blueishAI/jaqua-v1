@@ -167,6 +167,7 @@ run_variant() {
   export JAQUA_MAX_SAMPLES="${max_samples}"
   export JAQUA_LOG_EVERY="20"
   export JAQUA_SAVE_EVERY="200"
+  export JAQUA_QLORA="1"
 
   local artifact="jaqua-${param_label}-${variant}"
   local merged_dir="${JAQUA_OUTPUT_DIR}/merged/${artifact}-F16"

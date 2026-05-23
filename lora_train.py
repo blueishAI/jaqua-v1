@@ -8,9 +8,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets, load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
+from peft import prepare_model_for_kbit_training
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from config import JaquaConfig
 
@@ -178,14 +179,28 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    use_qlora = os.getenv("JAQUA_QLORA", "0") == "1"
+    quantization_config = None
+    if use_qlora:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=_cuda_dtype(),
+            bnb_4bit_use_double_quant=True,
+        )
+
     model = AutoModelForCausalLM.from_pretrained(
         cfg.base_model_id,
         torch_dtype=_cuda_dtype(),
         attn_implementation="sdpa",
         low_cpu_mem_usage=True,
+        quantization_config=quantization_config,
+        device_map={"": local_rank} if use_qlora and device == "cuda" else None,
     )
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
+    if use_qlora:
+        model = prepare_model_for_kbit_training(model)
 
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -197,7 +212,8 @@ def main() -> None:
     )
     model = get_peft_model(model, lora_cfg)
     model.enable_input_require_grads()
-    model.to(device)
+    if not use_qlora:
+        model.to(device)
     model.train()
 
     ds = _load_training_dataset(cfg, tokenizer)
@@ -212,7 +228,7 @@ def main() -> None:
         collate_fn=lambda examples: _collate_batch(tokenizer, examples),
     )
 
-    if world_size > 1:
+    if world_size > 1 and not use_qlora:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=cfg.lora_lr, weight_decay=0.0)
