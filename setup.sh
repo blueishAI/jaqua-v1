@@ -78,13 +78,13 @@ PY
     exit 1
   fi
 
-  echo "[setup] downloading llama.cpp source for convert_hf_to_gguf.py only"
+  echo "[setup] downloading llama.cpp source for GGUF converter"
   wget -q -O /kaggle/temp/llama-source.tar.gz "${LLAMA_SOURCE_URL}"
   tar -xzf /kaggle/temp/llama-source.tar.gz -C "${LLAMA_SRC_DIR}" --strip-components=1
-  cp "${LLAMA_SRC_DIR}/convert_hf_to_gguf.py" "${LLAMA_ROOT}/convert_hf_to_gguf.py"
+  ln -sfn "${LLAMA_SRC_DIR}/convert_hf_to_gguf.py" "${LLAMA_ROOT}/convert_hf_to_gguf.py"
 }
 
-if [[ ! -x "${LLAMA_BIN_DIR}/llama-cli" ]] || [[ ! -f "${LLAMA_ROOT}/convert_hf_to_gguf.py" ]]; then
+if [[ ! -x "${LLAMA_BIN_DIR}/llama-cli" ]] || [[ ! -f "${LLAMA_SRC_DIR}/convert_hf_to_gguf.py" ]]; then
   download_llama_release
 else
   echo "[setup] using existing llama.cpp binaries in ${LLAMA_BIN_DIR}"

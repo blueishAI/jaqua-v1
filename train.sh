@@ -58,10 +58,12 @@ quantize_bin() {
 }
 
 convert_script() {
-  if [[ -f /kaggle/temp/llama.cpp/convert_hf_to_gguf.py ]]; then
+  if [[ -f /kaggle/temp/llama.cpp-src/convert_hf_to_gguf.py ]]; then
+    echo /kaggle/temp/llama.cpp-src/convert_hf_to_gguf.py
+  elif [[ -f /kaggle/temp/llama.cpp-src/convert_hf_to_gguf_update.py ]]; then
+    echo /kaggle/temp/llama.cpp-src/convert_hf_to_gguf_update.py
+  elif [[ -f /kaggle/temp/llama.cpp/convert_hf_to_gguf.py ]]; then
     echo /kaggle/temp/llama.cpp/convert_hf_to_gguf.py
-  elif [[ -f /kaggle/temp/llama.cpp/convert_hf_to_gguf_update.py ]]; then
-    echo /kaggle/temp/llama.cpp/convert_hf_to_gguf_update.py
   else
     echo "Missing llama.cpp HF-to-GGUF conversion script" >&2
     exit 1
